@@ -1,0 +1,113 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  build_test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Install gotestsum
+        shell: bash
+        run: |
+          go install gotest.tools/gotestsum@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run unit tests (JUnit)
+        shell: bash
+        run: |
+          mkdir -p test-results
+          gotestsum --junitfile test-results/junit.xml -- ./...
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}
+          path: test-results/junit.xml
+          if-no-files-found: error
+
+  test_report:
+    name: Publish test report
+    runs-on: ubuntu-latest
+    needs: build_test
+    if: always()
+
+    steps:
+      - name: Download all JUnit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Unit Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: |
+            artifacts/**/junit.xml
+
+  deploy:
+    name: Deploy (publish artifacts)
+    runs-on: ubuntu-latest
+    needs: test_report
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -o dist/textkit-linux-amd64 ./cmd/textkit
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -o dist/textkit-windows-amd64.exe ./cmd/textkit
+
+          # macOS Intel
+          GOOS=darwin GOARCH=amd64 go build -o dist/textkit-darwin-amd64 ./cmd/textkit
+
+          # macOS Apple Silicon
+          GOOS=darwin GOARCH=arm64 go build -o dist/textkit-darwin-arm64 ./cmd/textkit
+
+          ls -la dist
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: dist/*
+          if-no-files-found: error
